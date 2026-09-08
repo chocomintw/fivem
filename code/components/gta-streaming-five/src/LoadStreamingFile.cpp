@@ -1399,146 +1399,6 @@ struct CInteriorProxy
 };
 
 #ifdef GTA_FIVE
-#include <RageParser.h>
-
-struct CPedFacialOverlays
-{
-	atArray<uint32_t> m_blemishes;
-	atArray<uint32_t> m_facialHair;
-	atArray<uint32_t> m_eyebrow;
-	atArray<uint32_t> m_aging;
-	atArray<uint32_t> m_makeup;
-	atArray<uint32_t> m_blusher;
-	atArray<uint32_t> m_damage;
-	atArray<uint32_t> m_baseDetail;
-	atArray<uint32_t> m_skinDetail1;
-	atArray<uint32_t> m_skinDetail2;
-	atArray<uint32_t> m_bodyOverlay1;
-	atArray<uint32_t> m_bodyOverlay2;
-	atArray<uint32_t> m_bodyOverlay3;
-};
-
-static CPedFacialOverlays* g_pedFacialOverlaysStore;
-static void** g_facialOverlaysParManager;
-
-static hook::thiscall_stub<bool(void*, const char*, const char*, void*, void*, int, void*)> _facialOverlaysCreateAndLoad([]
-{
-	return hook::get_call(hook::get_pattern("C6 44 24 28 01 48 89 44 24 20 E8 ? ? ? ? 83 0D", 10));
-});
-
-static bool LoadFacialOverlaysFromFile(const char* filePath, CPedFacialOverlays* target)
-{
-	auto parserStruct = rage::GetStructureDefinition("CPedFacialOverlays");
-	if (!parserStruct)
-	{
-		return false;
-	}
-
-	std::string basePath(filePath);
-	auto dotPos = basePath.find_last_of('.');
-	if (dotPos != std::string::npos)
-	{
-		basePath = basePath.substr(0, dotPos);
-	}
-
-	return _facialOverlaysCreateAndLoad(*g_facialOverlaysParManager, basePath.c_str(), "meta", parserStruct, target, 0, nullptr);
-}
-
-static void AppendOverlayArray(atArray<uint32_t>& target, atArray<uint32_t>& source)
-{
-	auto numToAdd = source.GetCount();
-	if (numToAdd == 0)
-	{
-		return;
-	}
-
-	uint16_t requiredSize = target.GetCount() + numToAdd;
-	if (requiredSize > target.GetSize())
-	{
-		target.Expand(requiredSize);
-	}
-
-	for (uint16_t i = 0; i < numToAdd; i++)
-	{
-		target.Set(target.GetCount(), source[i]);
-	}
-}
-
-static void RemoveOverlayArray(atArray<uint32_t>& target, atArray<uint32_t>& source)
-{
-	for (uint16_t i = 0; i < source.GetCount(); i++)
-	{
-		for (int j = 0; j < target.GetCount(); j++)
-		{
-			if (target[j] == source[i])
-			{
-				target.Remove(j);
-				break;
-			}
-		}
-	}
-}
-
-class CfxPedFacialOverlaysMounter : public CDataFileMountInterface
-{
-public:
-	virtual bool LoadDataFile(CDataFileMgr::DataFile* entry) override
-	{
-		CPedFacialOverlays loadedOverlays{};
-
-		if (!LoadFacialOverlaysFromFile(entry->name, &loadedOverlays))
-		{
-			return false;
-		}
-
-		auto store = g_pedFacialOverlaysStore;
-		AppendOverlayArray(store->m_blemishes, loadedOverlays.m_blemishes);
-		AppendOverlayArray(store->m_facialHair, loadedOverlays.m_facialHair);
-		AppendOverlayArray(store->m_eyebrow, loadedOverlays.m_eyebrow);
-		AppendOverlayArray(store->m_aging, loadedOverlays.m_aging);
-		AppendOverlayArray(store->m_makeup, loadedOverlays.m_makeup);
-		AppendOverlayArray(store->m_blusher, loadedOverlays.m_blusher);
-		AppendOverlayArray(store->m_damage, loadedOverlays.m_damage);
-		AppendOverlayArray(store->m_baseDetail, loadedOverlays.m_baseDetail);
-		AppendOverlayArray(store->m_skinDetail1, loadedOverlays.m_skinDetail1);
-		AppendOverlayArray(store->m_skinDetail2, loadedOverlays.m_skinDetail2);
-		AppendOverlayArray(store->m_bodyOverlay1, loadedOverlays.m_bodyOverlay1);
-		AppendOverlayArray(store->m_bodyOverlay2, loadedOverlays.m_bodyOverlay2);
-		AppendOverlayArray(store->m_bodyOverlay3, loadedOverlays.m_bodyOverlay3);
-
-		return true;
-	}
-
-	virtual void UnloadDataFile(CDataFileMgr::DataFile* entry) override
-	{
-		CPedFacialOverlays loadedOverlays{};
-
-		if (!LoadFacialOverlaysFromFile(entry->name, &loadedOverlays))
-		{
-			return;
-		}
-
-		auto store = g_pedFacialOverlaysStore;
-		RemoveOverlayArray(store->m_blemishes, loadedOverlays.m_blemishes);
-		RemoveOverlayArray(store->m_facialHair, loadedOverlays.m_facialHair);
-		RemoveOverlayArray(store->m_eyebrow, loadedOverlays.m_eyebrow);
-		RemoveOverlayArray(store->m_aging, loadedOverlays.m_aging);
-		RemoveOverlayArray(store->m_makeup, loadedOverlays.m_makeup);
-		RemoveOverlayArray(store->m_blusher, loadedOverlays.m_blusher);
-		RemoveOverlayArray(store->m_damage, loadedOverlays.m_damage);
-		RemoveOverlayArray(store->m_baseDetail, loadedOverlays.m_baseDetail);
-		RemoveOverlayArray(store->m_skinDetail1, loadedOverlays.m_skinDetail1);
-		RemoveOverlayArray(store->m_skinDetail2, loadedOverlays.m_skinDetail2);
-		RemoveOverlayArray(store->m_bodyOverlay1, loadedOverlays.m_bodyOverlay1);
-		RemoveOverlayArray(store->m_bodyOverlay2, loadedOverlays.m_bodyOverlay2);
-		RemoveOverlayArray(store->m_bodyOverlay3, loadedOverlays.m_bodyOverlay3);
-	}
-};
-
-static CfxPedFacialOverlaysMounter g_pedFacialOverlaysMounter;
-#endif
-
-#ifdef GTA_FIVE
 static hook::thiscall_stub<int(void* store, int* out, uint32_t* inHash)> _getIndexByKey([]()
 {
 	return hook::get_pattern("39 1C 91 74 4F 44 8B 4C 91 08 45 3B", -0x34);
@@ -1637,13 +1497,6 @@ static CDataFileMountInterface* LookupDataFileMounter(const std::string& type)
 	{
 		return &g_staticCacheMounter;
 	}
-
-#ifdef GTA_FIVE
-	if (type == "CFX_PED_FACIAL_OVERLAYS")
-	{
-		return &g_pedFacialOverlaysMounter;
-	}
-#endif
 
 	int fileType = LookupDataFileType(type);
 
@@ -3655,13 +3508,6 @@ static HookFunction hookFunction([]()
 #endif
 
 #ifdef GTA_FIVE
-
-	g_pedFacialOverlaysStore = hook::get_address<decltype(g_pedFacialOverlaysStore)>(hook::get_pattern<char>("48 8D 05 ? ? ? ? 48 8D 1D ? ? ? ? 48 8D 15", 3));
-
-	{
-		auto location = hook::get_pattern("BA 13 00 00 00 48 8D 48 10 48 8B 01", 15);
-		g_facialOverlaysParManager = hook::get_address<void**>(location, 3, 7);
-	}
 
 	loadChangeSet = hook::get_pattern<char>("48 81 EC 50 03 00 00 49 8B F0 4C", -0x18);
 
