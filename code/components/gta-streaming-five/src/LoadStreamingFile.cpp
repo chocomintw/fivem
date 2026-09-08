@@ -1416,16 +1416,7 @@ struct CPedFacialOverlays
 	atArray<uint32_t> m_bodyOverlay1;
 	atArray<uint32_t> m_bodyOverlay2;
 	atArray<uint32_t> m_bodyOverlay3;
-
-	bool LoadFromFile(const char* filePath);
 };
-
-bool CPedFacialOverlays::LoadFromFile(const char* filePath)
-{
-	auto parserStruct = rage::GetStructureDefinition("CPedFacialOverlays");
-	
-	return LoadFromStructure(filePath, "meta", parserStruct, this, true, nullptr);
-}
 
 static CPedFacialOverlays* g_pedFacialOverlaysStore;
 
@@ -1707,10 +1698,6 @@ public:
 };
 
 static CfxPedSkinTonesMounter g_pedSkinTonesMounter;
-
-
-
-
 #endif
 
 #ifdef GTA_FIVE
@@ -1813,7 +1800,7 @@ static CDataFileMountInterface* LookupDataFileMounter(const std::string& type)
 		return &g_staticCacheMounter;
 	}
 
-#if GTA_FIVE
+#ifdef GTA_FIVE
 	if (type == "CFX_PED_SKIN_TONES")
 	{
 		return &g_pedSkinTonesMounter;
@@ -3640,8 +3627,6 @@ void* chunkyArrayAppend(hook::FlexStruct* self)
 	return g_chunkyArrayAppend(self);
 }
 
-#endif
-
 static ConsoleCommand pgRawStreamer_AssetsCountCmd("assetscount", []()
 {
 	std::stringstream ss;
@@ -3662,6 +3647,8 @@ const rage::chunkyArray<rage::fiCollection::RawEntry, 1024, 64>& rage::GetPgRawS
 {
 	return g_GetRawStreamer()->m_entries;
 }
+
+#endif
 
 static void CleanupStreaming()
 {
