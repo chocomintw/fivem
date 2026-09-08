@@ -1524,74 +1524,100 @@ static void RemoveHash(atArray<uint32_t>& arr, uint32_t value)
 	}
 }
 
-// these stores load from a run of near-identical call sites and the path operand cannot
-// anchor them, so each match is validated against the shape CPedSkinTones has to have
+// this store loads from a run of near-identical call sites and the path operand cannot
+// anchor them, so each match is checked against the shape CPedSkinTones has to have. that
+// check reads the store's contents, so it only answers once the base data has loaded -
+// hence a failed lookup is retried on the next mount rather than latched.
 static void* GetPedSkinTonesStore()
 {
-	static void* store = ([]() -> void*
+	static void* store = nullptr;
+
+	if (store)
 	{
-		auto def = rage::GetStructureDefinition("CPedSkinTones");
+		return store;
+	}
 
-		if (!def)
+	auto def = rage::GetStructureDefinition("CPedSkinTones");
+
+	if (!def)
+	{
+		trace("CFX_PED_SKIN_TONES: parser structure unavailable\n");
+		return nullptr;
+	}
+
+	auto matches = hook::pattern("48 8B 0D ? ? ? ? 48 8D 05 ? ? ? ? 48 8D 15 ? ? ? ? 4C 8B C3");
+
+	if (matches.empty())
+	{
+		trace("CFX_PED_SKIN_TONES: no candidate call sites found\n");
+		return nullptr;
+	}
+
+	void* found = nullptr;
+
+	for (size_t i = 0; i < matches.size(); i++)
+	{
+		// the store is the operand of the second instruction in the run
+		auto candidate = hook::get_address<void*>(matches.get(i).get<void>(7), 3, 7);
+
+		// several of these call sites legitimately load the same store
+		if (!candidate || candidate == found)
 		{
-			trace("CFX_PED_SKIN_TONES: parser structure unavailable\n");
+			continue;
+		}
+
+		auto arrays = GetHashArrays(def, candidate);
+
+		if (arrays.hashes.empty())
+		{
+			continue;
+		}
+
+		auto tones = arrays.hashes[0]->GetCount();
+
+		if (tones == 0 || tones > 64)
+		{
+			continue;
+		}
+
+		// all components carry the same number of tones in every shipped build, and an
+		// atArray we are going to append to has to be internally consistent
+		bool plausible = true;
+
+		for (auto array : arrays.hashes)
+		{
+			if (array->GetCount() != tones || array->GetCount() > array->GetSize() || !array->m_offset)
+			{
+				plausible = false;
+				break;
+			}
+		}
+
+		if (!plausible)
+		{
+			continue;
+		}
+
+		if (found)
+		{
+			// two different addresses both look like the store, so picking one is a
+			// guess, and guessing wrong appends hashes over unrelated memory
+			trace("CFX_PED_SKIN_TONES: ambiguous store, %p and %p both match\n", found, candidate);
 			return nullptr;
 		}
 
-		auto matches = hook::pattern("48 8B 0D ? ? ? ? 48 8D 05 ? ? ? ? 48 8D 15 ? ? ? ? 4C 8B C3");
-		matches.count_hint(8);
+		found = candidate;
+	}
 
-		if (matches.empty())
-		{
-			trace("CFX_PED_SKIN_TONES: no candidate call sites found\n");
-			return nullptr;
-		}
-
-		for (size_t i = 0; i < matches.size(); i++)
-		{
-			// the store is the operand of the second instruction in the run
-			auto candidate = hook::get_address<void*>(matches.get(i).get<void>(7), 3, 7);
-			if (!candidate)
-			{
-				continue;
-			}
-
-			auto arrays = GetHashArrays(def, candidate);
-			if (arrays.hashes.empty())
-			{
-				continue;
-			}
-
-			auto tones = arrays.hashes[0]->GetCount();
-			if (tones == 0 || tones > 64)
-			{
-				continue;
-			}
-
-			// all components carry the same number of tones in every shipped build
-			bool consistent = true;
-
-			for (auto array : arrays.hashes)
-			{
-				if (array->GetCount() != tones)
-				{
-					consistent = false;
-					break;
-				}
-			}
-
-			if (!consistent)
-			{
-				continue;
-			}
-
-			trace("CFX_PED_SKIN_TONES: store at %p (%d tones per component)\n", candidate, (int)tones);
-			return candidate;
-		}
-
+	if (!found)
+	{
 		trace("CFX_PED_SKIN_TONES: no call site resolved to a usable store\n");
 		return nullptr;
-	})();
+	}
+
+	trace("CFX_PED_SKIN_TONES: store at %p\n", found);
+
+	store = found;
 
 	return store;
 }
