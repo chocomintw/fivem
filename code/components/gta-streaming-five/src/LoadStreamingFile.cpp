@@ -1457,14 +1457,17 @@ static ParsedHashArrays GetHashArrays(rage::parStructure* def, void* base)
 	return arrays;
 }
 
-// appends hashes dst does not have yet, returning the count so unload can trim it back
-// again - skipping duplicates lets a file be a full replacement or only its own additions
-static uint16_t AppendUniqueHashes(atArray<uint32_t>& dst, atArray<uint32_t>& src)
+// appends hashes dst does not have yet, returning the ones it appended so unload can take
+// exactly those back out - skipping duplicates lets a file be a full replacement or only
+// its own additions
+static std::vector<uint32_t> AppendUniqueHashes(atArray<uint32_t>& dst, atArray<uint32_t>& src)
 {
+	std::vector<uint32_t> appended;
+
 	uint16_t srcCount = src.GetCount();
 	if (srcCount == 0)
 	{
-		return 0;
+		return appended;
 	}
 
 	uint16_t headroom = static_cast<uint16_t>(UINT16_MAX - dst.GetCount());
@@ -1479,8 +1482,6 @@ static uint16_t AppendUniqueHashes(atArray<uint32_t>& dst, atArray<uint32_t>& sr
 	{
 		dst.Expand(dst.GetCount() + srcCount);
 	}
-
-	uint16_t appended = 0;
 
 	for (uint16_t i = 0; i < srcCount; i++)
 	{
@@ -1503,18 +1504,23 @@ static uint16_t AppendUniqueHashes(atArray<uint32_t>& dst, atArray<uint32_t>& sr
 
 		dst.Get(dst.GetCount()) = value;
 		dst.m_count = dst.GetCount() + 1;
-		appended++;
+		appended.push_back(value);
 	}
 
 	return appended;
 }
 
-// removes what we appended, always the tail - by value could delete a base game entry
-static void TrimAppendedHashes(atArray<uint32_t>& arr, uint16_t count)
+// data files unload one at a time as their resource stops, in no particular order, so the
+// entries a given file added are not necessarily the tail - remove them by value instead
+static void RemoveHash(atArray<uint32_t>& arr, uint32_t value)
 {
-	if (count > 0 && arr.GetCount() >= count)
+	for (uint16_t i = 0; i < arr.GetCount(); i++)
 	{
-		arr.m_count = arr.GetCount() - count;
+		if (arr.Get(i) == value)
+		{
+			arr.Remove(i);
+			return;
+		}
 	}
 }
 
@@ -1598,8 +1604,42 @@ private:
 	const char* m_structName;
 	std::function<void*()> m_getStore;
 
-	// how many entries this mounter appended to each hash array, keyed by data file
-	std::map<std::string, std::vector<uint16_t>> m_added;
+	struct MountedHashes
+	{
+		// every hash the file names, whether or not it was already present. tells us
+		// whether some other still-mounted file also wants a hash we are about to remove
+		std::vector<std::vector<uint32_t>> referenced;
+
+		// the subset this file actually appended, and so the only hashes it may remove.
+		// AppendUniqueHashes never reports one that was already there, which is what
+		// keeps the game's own entries out of reach.
+		std::vector<std::vector<uint32_t>> appended;
+	};
+
+	// what each still-mounted data file contributed
+	std::map<std::string, MountedHashes> m_mounted;
+
+	// ponytail: linear scan across every mounted file, fine for the dozens of hashes
+	// these carry; index it if someone ever ships hundreds of overlay data files
+	bool IsReferencedElsewhere(const std::string& self, size_t index, uint32_t value) const
+	{
+		for (const auto& [name, mounted] : m_mounted)
+		{
+			if (name == self || index >= mounted.referenced.size())
+			{
+				continue;
+			}
+
+			const auto& hashes = mounted.referenced[index];
+
+			if (std::find(hashes.begin(), hashes.end(), value) != hashes.end())
+			{
+				return true;
+			}
+		}
+
+		return false;
+	}
 
 public:
 	CfxPedMetadataMounter(const char* structName, std::function<void*()> getStore)
@@ -1644,16 +1684,22 @@ public:
 		// the same definition on both sides, so the two lists line up by construction
 		auto src = GetHashArrays(def, scratch);
 
-		std::vector<uint16_t> added(dst.hashes.size());
-		uint16_t total = 0;
+		MountedHashes mounted;
+		mounted.referenced.resize(dst.hashes.size());
+		mounted.appended.resize(dst.hashes.size());
+
+		size_t total = 0;
 
 		for (size_t i = 0; i < dst.hashes.size(); i++)
 		{
-			added[i] = AppendUniqueHashes(*dst.hashes[i], *src.hashes[i]);
-			total += added[i];
+			auto& srcArray = *src.hashes[i];
+
+			mounted.referenced[i].assign(srcArray.begin(), srcArray.end());
+			mounted.appended[i] = AppendUniqueHashes(*dst.hashes[i], srcArray);
+			total += mounted.appended[i].size();
 		}
 
-		m_added[entry->name] = std::move(added);
+		m_mounted[entry->name] = std::move(mounted);
 
 		uint16_t ignored = 0;
 		for (auto array : src.ignored)
@@ -1663,7 +1709,7 @@ public:
 
 		def->m_delete(scratch);
 
-		trace("%s: appended %d entries from %s\n", m_structName, total, fileName);
+		trace("%s: appended %d entries from %s\n", m_structName, (int)total, fileName);
 
 		if (ignored > 0)
 		{
@@ -1676,21 +1722,30 @@ public:
 	{
 		auto store = m_getStore();
 		auto def = rage::GetStructureDefinition(m_structName);
-		auto it = m_added.find(entry->name);
+		auto it = m_mounted.find(entry->name);
 
-		if (!store || !def || it == m_added.end())
+		if (!store || !def || it == m_mounted.end())
 		{
 			return;
 		}
 
 		auto dst = GetHashArrays(def, store);
+		const auto& appended = it->second.appended;
 
-		for (size_t i = 0; i < dst.hashes.size() && i < it->second.size(); i++)
+		for (size_t i = 0; i < dst.hashes.size() && i < appended.size(); i++)
 		{
-			TrimAppendedHashes(*dst.hashes[i], it->second[i]);
+			for (uint32_t value : appended[i])
+			{
+				// leave it alone if another still-mounted file names it too, so stopping
+				// one resource does not take away an entry another one is still using
+				if (!IsReferencedElsewhere(entry->name, i, value))
+				{
+					RemoveHash(*dst.hashes[i], value);
+				}
+			}
 		}
 
-		m_added.erase(it);
+		m_mounted.erase(it);
 	}
 };
 
