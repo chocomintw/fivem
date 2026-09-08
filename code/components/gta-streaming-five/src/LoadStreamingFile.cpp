@@ -1401,24 +1401,61 @@ struct CInteriorProxy
 #ifdef GTA_FIVE
 #include <RageParser.h>
 
-struct CPedFacialOverlays
+static void* g_pedFacialOverlaysStore;
+
+// the appendable members of these structures are atArrays of 4-byte hashes. taking the
+// offsets from the parser definition instead of assuming a layout keeps the mounters
+// correct if a game update reorders or inserts a member, and separates out the atArrays
+// that are not hash lists: the males/females/uniqueMales/uniqueFemales lists in
+// CPedSkinTones hold indices into the file's own ordering, so appending them would need
+// remapping.
+struct ParsedHashArrays
 {
-	atArray<uint32_t> m_blemishes;
-	atArray<uint32_t> m_facialHair;
-	atArray<uint32_t> m_eyebrow;
-	atArray<uint32_t> m_aging;
-	atArray<uint32_t> m_makeup;
-	atArray<uint32_t> m_blusher;
-	atArray<uint32_t> m_damage;
-	atArray<uint32_t> m_baseDetail;
-	atArray<uint32_t> m_skinDetail1;
-	atArray<uint32_t> m_skinDetail2;
-	atArray<uint32_t> m_bodyOverlay1;
-	atArray<uint32_t> m_bodyOverlay2;
-	atArray<uint32_t> m_bodyOverlay3;
+	std::vector<atArray<uint32_t>*> hashes;
+
+	// the atArrays we do not append to. only the element count is ever read from these,
+	// and atArray<T>::m_count sits at the same offset for every T, so the type stands in.
+	std::vector<atArray<uint8_t>*> ignored;
 };
 
-static CPedFacialOverlays* g_pedFacialOverlaysStore;
+static void CollectHashArrays(rage::parStructure* def, void* base, ParsedHashArrays& out)
+{
+	if (def->m_baseClass)
+	{
+		CollectHashArrays(def->m_baseClass, base, out);
+	}
+
+	for (auto& member : def->m_members)
+	{
+		auto memberDef = member ? member->m_definition : nullptr;
+
+		if (!memberDef || memberDef->type != rage::parMemberType::Array || memberDef->arrayType != rage::parArrayType::atArray)
+		{
+			continue;
+		}
+
+		auto array = static_cast<char*>(base) + memberDef->offset;
+
+		// keyed on the element size we actually depend on rather than the member type,
+		// as rage spells a hash list's elements differently across structures
+		if (memberDef->arrayElemSize == sizeof(uint32_t))
+		{
+			out.hashes.push_back(reinterpret_cast<atArray<uint32_t>*>(array));
+		}
+		else
+		{
+			out.ignored.push_back(reinterpret_cast<atArray<uint8_t>*>(array));
+		}
+	}
+}
+
+static ParsedHashArrays GetHashArrays(rage::parStructure* def, void* base)
+{
+	ParsedHashArrays arrays;
+	CollectHashArrays(def, base, arrays);
+
+	return arrays;
+}
 
 // appends hashes dst does not have yet, returning the count so unload can trim it back
 // again - skipping duplicates lets a file be a full replacement or only its own additions
@@ -1481,99 +1518,20 @@ static void TrimAppendedHashes(atArray<uint32_t>& arr, uint16_t count)
 	}
 }
 
-class CfxPedFacialOverlaysMounter : public CDataFileMountInterface
-{
-private:
-	static constexpr size_t kOverlayCount = 13;
-
-	// how many entries this mounter appended to each overlay array, keyed by data file
-	std::map<std::string, std::array<uint16_t, kOverlayCount>> m_added;
-
-public:
-	virtual bool LoadDataFile(CDataFileMgr::DataFile* entry) override
-	{
-		auto def = rage::GetStructureDefinition("CPedFacialOverlays");
-
-		if (!g_pedFacialOverlaysStore || !def || !def->m_new || !def->m_delete)
-		{
-			trace("CFX_PED_FACIAL_OVERLAYS: store or parser structure unavailable\n");
-			return false;
-		}
-
-		void* scratch = def->m_new();
-		if (!scratch)
-		{
-			return false;
-		}
-
-		std::string fileName = entry->name;
-		auto basePath = fileName.substr(0, fileName.find_last_of('.'));
-
-		if (!rage::LoadFromStructure(basePath.c_str(), "meta", def, scratch, true, nullptr))
-		{
-			def->m_delete(scratch);
-			return false;
-		}
-
-		// the 13 members are consecutive atArray<uint32_t> at 16 byte intervals
-		auto dst = reinterpret_cast<atArray<uint32_t>*>(g_pedFacialOverlaysStore);
-		auto src = reinterpret_cast<atArray<uint32_t>*>(scratch);
-
-		std::array<uint16_t, kOverlayCount> added{};
-		uint16_t total = 0;
-
-		for (size_t i = 0; i < kOverlayCount; i++)
-		{
-			added[i] = AppendUniqueHashes(dst[i], src[i]);
-			total += added[i];
-		}
-
-		m_added[entry->name] = added;
-		def->m_delete(scratch);
-
-		trace("CFX_PED_FACIAL_OVERLAYS: appended %d entries from %s\n", total, fileName);
-		return true;
-	}
-
-	virtual void UnloadDataFile(CDataFileMgr::DataFile* entry) override
-	{
-		auto it = m_added.find(entry->name);
-
-		if (!g_pedFacialOverlaysStore || it == m_added.end())
-		{
-			return;
-		}
-
-		auto dst = reinterpret_cast<atArray<uint32_t>*>(g_pedFacialOverlaysStore);
-
-		for (size_t i = 0; i < kOverlayCount; i++)
-		{
-			TrimAppendedHashes(dst[i], it->second[i]);
-		}
-
-		m_added.erase(it);
-	}
-};
-
-static CfxPedFacialOverlaysMounter g_pedFacialOverlaysMounter;
-
-// layout per the game's parser definition: three component arrays at 0, then four byte
-// arrays at 48/64/80/96, 112 bytes in total
-struct CPedSkinTonesStore
-{
-	atArray<uint32_t> comps[3];
-
-	// males/females/uniqueMales/uniqueFemales - indices into the file's own ordering, so
-	// appending them would need remapping; only read to report that they were ignored
-	atArray<uint8_t> genderIndices[4];
-};
-
 // these stores load from a run of near-identical call sites and the path operand cannot
 // anchor them, so each match is validated against the shape CPedSkinTones has to have
-static CPedSkinTonesStore* GetPedSkinTonesStore()
+static void* GetPedSkinTonesStore()
 {
-	static CPedSkinTonesStore* store = ([]() -> CPedSkinTonesStore*
+	static void* store = ([]() -> void*
 	{
+		auto def = rage::GetStructureDefinition("CPedSkinTones");
+
+		if (!def)
+		{
+			trace("CFX_PED_SKIN_TONES: parser structure unavailable\n");
+			return nullptr;
+		}
+
 		auto matches = hook::pattern("48 8B 0D ? ? ? ? 48 8D 05 ? ? ? ? 48 8D 15 ? ? ? ? 4C 8B C3");
 		matches.count_hint(8);
 
@@ -1586,26 +1544,42 @@ static CPedSkinTonesStore* GetPedSkinTonesStore()
 		for (size_t i = 0; i < matches.size(); i++)
 		{
 			// the store is the operand of the second instruction in the run
-			auto candidate = hook::get_address<CPedSkinTonesStore*>(matches.get(i).get<void>(7), 3, 7);
+			auto candidate = hook::get_address<void*>(matches.get(i).get<void>(7), 3, 7);
 			if (!candidate)
 			{
 				continue;
 			}
 
-			if (candidate->comps[0].GetCount() == 0 || candidate->comps[0].GetCount() > 64)
+			auto arrays = GetHashArrays(def, candidate);
+			if (arrays.hashes.empty())
 			{
 				continue;
 			}
 
-			// all three components carry the same number of tones in every shipped build
-			if (candidate->comps[1].GetCount() != candidate->comps[0].GetCount() ||
-				candidate->comps[2].GetCount() != candidate->comps[0].GetCount())
+			auto tones = arrays.hashes[0]->GetCount();
+			if (tones == 0 || tones > 64)
 			{
 				continue;
 			}
 
-			trace("CFX_PED_SKIN_TONES: store at %p (%d tones per component)\n",
-				(void*)candidate, (int)candidate->comps[0].GetCount());
+			// all components carry the same number of tones in every shipped build
+			bool consistent = true;
+
+			for (auto array : arrays.hashes)
+			{
+				if (array->GetCount() != tones)
+				{
+					consistent = false;
+					break;
+				}
+			}
+
+			if (!consistent)
+			{
+				continue;
+			}
+
+			trace("CFX_PED_SKIN_TONES: store at %p (%d tones per component)\n", candidate, (int)tones);
 			return candidate;
 		}
 
@@ -1616,20 +1590,39 @@ static CPedSkinTonesStore* GetPedSkinTonesStore()
 	return store;
 }
 
-class CfxPedSkinTonesMounter : public CDataFileMountInterface
+// CFX_PED_FACIAL_OVERLAYS and CFX_PED_SKIN_TONES both append the hash lists of a parsed
+// structure to a single game-wide store of that same structure, so they share a mounter
+class CfxPedMetadataMounter : public CDataFileMountInterface
 {
 private:
-	std::map<std::string, std::array<uint16_t, 3>> m_added;
+	const char* m_structName;
+	std::function<void*()> m_getStore;
+
+	// how many entries this mounter appended to each hash array, keyed by data file
+	std::map<std::string, std::vector<uint16_t>> m_added;
 
 public:
+	CfxPedMetadataMounter(const char* structName, std::function<void*()> getStore)
+		: m_structName(structName), m_getStore(std::move(getStore))
+	{
+	}
+
 	virtual bool LoadDataFile(CDataFileMgr::DataFile* entry) override
 	{
-		auto store = GetPedSkinTonesStore();
-		auto def = rage::GetStructureDefinition("CPedSkinTones");
+		auto store = m_getStore();
+		auto def = rage::GetStructureDefinition(m_structName);
 
 		if (!store || !def || !def->m_new || !def->m_delete)
 		{
-			trace("CFX_PED_SKIN_TONES: store or parser structure unavailable\n");
+			trace("%s: store or parser structure unavailable\n", m_structName);
+			return false;
+		}
+
+		auto dst = GetHashArrays(def, store);
+
+		if (dst.hashes.empty())
+		{
+			trace("%s: parser structure has no hash lists to append to\n", m_structName);
 			return false;
 		}
 
@@ -1648,56 +1641,61 @@ public:
 			return false;
 		}
 
-		auto loaded = (CPedSkinTonesStore*)scratch;
-		std::array<uint16_t, 3> added{};
+		// the same definition on both sides, so the two lists line up by construction
+		auto src = GetHashArrays(def, scratch);
 
-		for (int i = 0; i < 3; i++)
+		std::vector<uint16_t> added(dst.hashes.size());
+		uint16_t total = 0;
+
+		for (size_t i = 0; i < dst.hashes.size(); i++)
 		{
-			auto& dst = store->comps[i];
-			auto& src = loaded->comps[i];
-
-			added[i] = AppendUniqueHashes(dst, src);
+			added[i] = AppendUniqueHashes(*dst.hashes[i], *src.hashes[i]);
+			total += added[i];
 		}
 
-		m_added[entry->name] = added;
+		m_added[entry->name] = std::move(added);
 
 		uint16_t ignored = 0;
-		for (size_t i = 0; i < 4; i++)
+		for (auto array : src.ignored)
 		{
-			ignored += loaded->genderIndices[i].GetCount();
+			ignored += array->GetCount();
 		}
 
 		def->m_delete(scratch);
 
-		trace("CFX_PED_SKIN_TONES: appended %d/%d/%d\n", added[0], added[1], added[2]);
+		trace("%s: appended %d entries from %s\n", m_structName, total, fileName);
 
 		if (ignored > 0)
 		{
-			trace("CFX_PED_SKIN_TONES: ignored %d entries in males/females/uniqueMales/uniqueFemales\n", ignored);
+			trace("%s: ignored %d entries in members that are not hash lists\n", m_structName, ignored);
 		}
 		return true;
 	}
 
 	virtual void UnloadDataFile(CDataFileMgr::DataFile* entry) override
 	{
-		auto store = GetPedSkinTonesStore();
+		auto store = m_getStore();
+		auto def = rage::GetStructureDefinition(m_structName);
 		auto it = m_added.find(entry->name);
 
-		if (!store || it == m_added.end())
+		if (!store || !def || it == m_added.end())
 		{
 			return;
 		}
 
-		for (int i = 0; i < 3; i++)
+		auto dst = GetHashArrays(def, store);
+
+		for (size_t i = 0; i < dst.hashes.size() && i < it->second.size(); i++)
 		{
-			TrimAppendedHashes(store->comps[i], it->second[i]);
+			TrimAppendedHashes(*dst.hashes[i], it->second[i]);
 		}
 
 		m_added.erase(it);
 	}
 };
 
-static CfxPedSkinTonesMounter g_pedSkinTonesMounter;
+static CfxPedMetadataMounter g_pedFacialOverlaysMounter{ "CPedFacialOverlays", []() -> void* { return g_pedFacialOverlaysStore; } };
+static CfxPedMetadataMounter g_pedSkinTonesMounter{ "CPedSkinTones", &GetPedSkinTonesStore };
 #endif
 
 #ifdef GTA_FIVE
