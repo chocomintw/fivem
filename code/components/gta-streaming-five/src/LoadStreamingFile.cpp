@@ -1429,22 +1429,64 @@ static void CollectHashArrays(rage::parStructure* def, void* base, ParsedHashArr
 	{
 		auto memberDef = member ? member->m_definition : nullptr;
 
-		if (!memberDef || memberDef->type != rage::parMemberType::Array || memberDef->arrayType != rage::parArrayType::atArray)
+		if (!memberDef)
 		{
 			continue;
 		}
 
-		auto array = static_cast<char*>(base) + memberDef->offset;
+		auto at = static_cast<char*>(base) + memberDef->offset;
+
+		// a nested structure just moves the search along by its offset
+		if (memberDef->type == rage::parMemberType::Struct)
+		{
+			if (memberDef->structure)
+			{
+				CollectHashArrays(memberDef->structure, at, out);
+			}
+
+			continue;
+		}
+
+		if (memberDef->type != rage::parMemberType::Array)
+		{
+			continue;
+		}
+
+		auto elementDef = member->m_arrayDefinition ? member->m_arrayDefinition->m_definition : nullptr;
+
+		// CPedSkinTones keeps its hash lists one level down, in a fixed array of structs
+		// that hold a single list each, so walk into those elements too. fixed arrays
+		// only: their length comes from the definition, so the store and the file being
+		// mounted are guaranteed to produce the same list in the same order.
+		if (elementDef && elementDef->type == rage::parMemberType::Struct)
+		{
+			bool fixed = memberDef->arrayType == rage::parArrayType::Fixed || memberDef->arrayType == rage::parArrayType::Fixed_2;
+
+			if (fixed && elementDef->structure)
+			{
+				for (uint32_t i = 0; i < memberDef->arrayElemCount; i++)
+				{
+					CollectHashArrays(elementDef->structure, at + (i * memberDef->arrayElemSize), out);
+				}
+			}
+
+			continue;
+		}
+
+		if (memberDef->arrayType != rage::parArrayType::atArray)
+		{
+			continue;
+		}
 
 		// keyed on the element size we actually depend on rather than the member type,
 		// as rage spells a hash list's elements differently across structures
 		if (memberDef->arrayElemSize == sizeof(uint32_t))
 		{
-			out.hashes.push_back(reinterpret_cast<atArray<uint32_t>*>(array));
+			out.hashes.push_back(reinterpret_cast<atArray<uint32_t>*>(at));
 		}
 		else
 		{
-			out.ignored.push_back(reinterpret_cast<atArray<uint8_t>*>(array));
+			out.ignored.push_back(reinterpret_cast<atArray<uint8_t>*>(at));
 		}
 	}
 }
